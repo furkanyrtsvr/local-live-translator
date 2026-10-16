@@ -1,0 +1,30 @@
+# Local environments and Python caches
+.venv*/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Downloaded third-party models, binaries and source
+models/
+vendor/
+
+# Audio, local logs and generated test output
+samples/
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.log
+temp_*
+
+# Credentials and local editor settings
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
