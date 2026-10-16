@@ -1,3 +1,4 @@
+# Main application environment (Python 3.13)
 numpy
 requests
 sounddevice

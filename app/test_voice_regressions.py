@@ -1,3 +1,4 @@
+"""Regression tests for audio processing and playback."""
 import queue
 import unittest
 from types import SimpleNamespace

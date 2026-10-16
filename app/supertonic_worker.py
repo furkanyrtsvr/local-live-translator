@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import onnxruntime as ort
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'vendor' / 'supertonic' / 'py'))
 from helper import TextToSpeech, load_cfgs, load_text_processor, load_voice_style
 

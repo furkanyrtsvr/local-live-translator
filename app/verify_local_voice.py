@@ -28,9 +28,9 @@ def main():
                    'translation_s': round(mt_seconds, 3), 'tts_s': round(tts_seconds, 3),
                    'audio_s': round(len(audio)/rate, 3)}, flush=True)
         audio, rate = voice.synthesize('Bence burada önemli olan yalnızca hız değil, konuşmanın doğal akması. Peki, bunu nasıl başaracağız? Önce sesi iyileştireceğiz, sonra çeviriyi birlikte değerlendireceğiz.')
-        sample_dir = Path(__file__).parent / 'samples'
+        sample_dir = Path(__file__).resolve().parent.parent / 'samples'
         sample_dir.mkdir(exist_ok=True)
-        with wave.open(str(sample_dir / 'yeni_ses_temiz.wav'), 'wb') as wav:
+        with wave.open(str(sample_dir / 'clean_voice_sample.wav'), 'wb') as wav:
             wav.setnchannels(1)
             wav.setsampwidth(2)
             wav.setframerate(rate)

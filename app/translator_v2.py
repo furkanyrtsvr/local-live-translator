@@ -1,6 +1,6 @@
 """
 =============================================================
-  PC SESİ CANLI ÇEVİRMEN - V2.2
+  PC SESİ CANLI ÇEVİRMEN - V2.2 (legacy)
 =============================================================
   Mimari:
     1. CAPTURE   → VB-Cable CABLE Output → sistem sesi yakalama

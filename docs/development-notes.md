@@ -1,8 +1,11 @@
-# Yerel ses güncellemesi — 16 Ekim 2026
+# Geliştirme ve test notları — 16 Ekim 2026
+
+Bu belge ses modeli değişikliğinin teknik ayrıntılarını, ölçümleri ve bilinen
+sınırlamaları açıklar. Genel kurulum ve kullanım için [README](../README.md).
 
 ## Çalıştırma
 
-Bu klasörde `run_v3_local.bat` çalıştırılır. Açık eski çevirmeni önce kendi
+Depo kökünde `run_v3_local.bat` çalıştırılır. Açık eski çevirmeni önce kendi
 penceresinde Ctrl+C ile kapatın; aynı çıkışta iki program birlikte konuşmasın.
 Bu güncelleme C: çalışma klasöründedir; F: kopyası değiştirilmedi.
 
@@ -13,7 +16,7 @@ Piper dosyaları silinmedi ancak V3 artık Piper kullanmıyor.
 
 ## Ses ayarları
 
-`voice_config.json` değiştikten sonra uygulamayı yeniden başlatın:
+`app/voice_config.json` değiştikten sonra uygulamayı yeniden başlatın:
 
 - `provider`: `dml` AMD DirectML; `cpu` alternatif.
 - `voice`: M1–M5 veya F1–F5; dosyalar yerelde hazır.
@@ -21,7 +24,8 @@ Piper dosyaları silinmedi ancak V3 artık Piper kullanmıyor.
 - `speed`: 1.12 varsayılan; 1.0 daha yavaş. Perde değiştirilmeden modelin süre
   tahmini üzerinden uygulanır.
 
-`samples/yeni_ses_temiz.wav` uygulamanın gerçek ses işleme yoluyla üretilmiştir.
+`samples/clean_voice_sample.wav` doğrulama komutuyla uygulamanın gerçek ses
+işleme yolundan üretilir. Önceki yerel örnek dosyalar korunmuştur.
 `samples/supertonic_cpu_F1_1.wav` alternatif kadın sesidir (ham model çıkışı).
 `supertonic_worker.log` yalnızca yerel ses işleminin hata kaydıdır.
 
@@ -86,13 +90,13 @@ Uygulama `py -3.13`; TTS ayrı `.venv-supertonic` Python 3.11 ortamında çalı�
 Mevcut Piper/Argos ONNX ortamını DirectML ile değiştirmemek için ayrılmıştır.
 
 ```cmd
-py -3.13 -m pip install -r requirements-v3-local.txt
+py -3.13 -m pip install -r app/requirements-v3-local.txt
 py -3.11 -m venv .venv-supertonic
-.venv-supertonic\Scripts\python.exe -m pip install -r requirements-supertonic.txt
-py -3.13 -m unittest test_latency_regressions test_voice_regressions -v
-py -3.13 verify_local_voice.py
+.venv-supertonic\Scripts\python.exe -m pip install -r app/requirements-supertonic.txt
+py -3.13 -m unittest discover -s app -p "test_*.py" -v
+py -3.13 app/verify_local_voice.py
 ```
 
-Bu komutlar model/kaynak dosyalarının zaten mevcut olduğunu varsayar.
-`verify_local_voice.py` mikrofonu açmadan ve kulaklıkta çalmadan gerçek modellerle
+Bu komutlar depo kökünden çalıştırılır ve model/kaynak dosyalarının zaten mevcut
+olduğunu varsayar. `app/verify_local_voice.py` mikrofonu açmadan ve kulaklıkta çalmadan gerçek modellerle
 sentez, çeviri ve geri-transkripsiyon testi yapar.

@@ -19,8 +19,23 @@ için İngilizce tutulmuştur.
 
 V3, bağımlılıklar ve modeller indirildikten sonra yerelde çalışır. Model
 sunucuları yalnızca `127.0.0.1` üzerinde dinler; bir bulut çeviri/TTS hesabı gerekmez.
-`translator_v2.py` eski sürümdür: Google/Edge tabanlı ağ servisleri kullanır ve
+`app/translator_v2.py` eski sürümdür: Google/Edge tabanlı ağ servisleri kullanır ve
 V3'ün çevrimdışı çalışma özelliğine sahip değildir.
+
+## Dosya düzeni
+
+```text
+local-live-translator/
+├── app/                     # Uygulama, testler, bağımlılıklar ve ses ayarı
+├── docs/
+│   └── development-notes.md  # Teknik değişiklikler ve test sonuçları
+├── README.md
+├── run_v3_local.bat          # Başlatıcı
+└── .gitignore
+```
+
+Yerel `models/`, `vendor/`, `samples/` ve sanal ortamlar depo kökünde kalır;
+GitHub'a yüklenmez. Aşağıdaki komutlar depo kökünden çalıştırılır.
 
 ## Gereksinimler
 
@@ -40,9 +55,9 @@ Depoyu klonlayıp klasöründe CMD açın:
 ```cmd
 git clone https://github.com/furkanyrtsvr/local-live-translator.git
 cd local-live-translator
-py -3.13 -m pip install -r requirements-v3-local.txt
+py -3.13 -m pip install -r app/requirements-v3-local.txt
 py -3.11 -m venv .venv-supertonic
-.venv-supertonic\Scripts\python.exe -m pip install -r requirements-supertonic.txt
+.venv-supertonic\Scripts\python.exe -m pip install -r app/requirements-supertonic.txt
 ```
 
 Depo private olduğu sürece klonlamak için yetkili GitHub hesabı gerekir.
@@ -94,7 +109,7 @@ algılamasını beklediğinden gecikmesiz değildir.
 
 ## Ses ayarları
 
-`voice_config.json` değiştikten sonra yeniden başlatın:
+`app/voice_config.json` değiştikten sonra yeniden başlatın:
 
 ```json
 {
@@ -114,18 +129,18 @@ Piper dosyaları V3 için artık gerekli değildir.
 Bağımlılıklar ve modeller hazırken:
 
 ```cmd
-py -3.13 -m unittest test_latency_regressions test_voice_regressions -v
-py -3.13 verify_local_voice.py
-.venv-supertonic\Scripts\python.exe benchmark_supertonic.py --provider dml --voices M1 F1
+py -3.13 -m unittest discover -s app -p "test_*.py" -v
+py -3.13 app/verify_local_voice.py
+.venv-supertonic\Scripts\python.exe app/benchmark_supertonic.py --provider dml --voices M1 F1
 ```
 
-`verify_local_voice.py` mikrofon kaydı veya kulaklıkta oynatma yapmadan gerçek
-modelleri sınar ve `samples/yeni_ses_temiz.wav` üretir. Örnek sesler, loglar,
+`app/verify_local_voice.py` mikrofon kaydı veya kulaklıkta oynatma yapmadan gerçek
+modelleri sınar ve `samples/clean_voice_sample.wav` üretir. Örnek sesler, loglar,
 modeller ve sanal ortamlar Git tarafından dışlanır.
 
 Test bilgisayarında üç örnekte TTS 0,68–0,86 saniye sürdü. Bu **yalnızca ses
 üretimi**, uçtan uca gecikme değildir. Kısa cümlelerde CPU bazen DirectML'den
-hızlı olabilir. Ayrıntılar: [ölçüm ve geliştirme notları](YEREL_SES_NOTLARI.md).
+hızlı olabilir. Ayrıntılar: [ölçüm ve geliştirme notları](docs/development-notes.md).
 
 ## Bilinen sınırlamalar
 

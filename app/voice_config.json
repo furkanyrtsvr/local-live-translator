@@ -1,6 +1,6 @@
 {
   "provider": "dml",
   "voice": "M1",
-  "steps": 8,
-  "speed": 1.12
+  "speed": 1.12,
+  "steps": 8
 }

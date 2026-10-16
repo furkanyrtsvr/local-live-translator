@@ -10,7 +10,8 @@ from pathlib import Path
 import numpy as np
 from scipy.signal import butter, sosfilt
 
-ROOT = Path(__file__).resolve().parent
+APP_DIR = Path(__file__).resolve().parent
+ROOT = APP_DIR.parent
 
 
 def clean_audio(audio, rate):
@@ -34,14 +35,14 @@ def clean_audio(audio, rate):
 
 class SupertonicVoice:
     def __init__(self):
-        config_path = ROOT / 'voice_config.json'
+        config_path = APP_DIR / 'voice_config.json'
         self.config = json.loads(config_path.read_text(encoding='utf-8'))
         python = ROOT / '.venv-supertonic' / 'Scripts' / 'python.exe'
         self.responses = queue.Queue()
         self.log = (ROOT / 'supertonic_worker.log').open('a', encoding='utf-8')
         try:
             self.process = subprocess.Popen(
-                [str(python), '-u', str(ROOT / 'supertonic_worker.py'),
+                [str(python), '-u', str(APP_DIR / 'supertonic_worker.py'),
                  '--provider', self.config['provider'], '--voice', self.config['voice'],
                  '--steps', str(self.config['steps']), '--speed', str(self.config['speed'])],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log,

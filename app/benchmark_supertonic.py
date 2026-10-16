@@ -12,7 +12,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--provider', default='cpu')
 parser.add_argument('--voices', nargs='+', default=['M1', 'F1'])
 args = parser.parse_args()
-out = Path(__file__).resolve().parent / 'samples'
+out = Path(__file__).resolve().parent.parent / 'samples'
 out.mkdir(exist_ok=True)
 text = 'Bence burada önemli olan yalnızca hız değil, konuşmanın doğal akması. Peki, bunu nasıl başaracağız? Önce sesi iyileştireceğiz, sonra çeviriyi birlikte değerlendireceğiz.'
 rows = []
