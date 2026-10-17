@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import onnxruntime as ort
+from realtime_policy import bounded_speed
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'vendor' / 'supertonic' / 'py'))
@@ -36,8 +37,15 @@ class Engine:
         self.style = load_voice_style([str(model / 'voice_styles' / (voice + '.json'))])
         self.steps, self.speed = steps, speed
 
-    def generate(self, text):
-        wav, duration = self.model(text, 'tr', self.style, self.steps, self.speed,
+    def generate(self, text, target_seconds=None, max_speed=1.55):
+        speed = self.speed
+        if target_seconds is not None:
+            ids, mask = self.model.text_processor([text], ['tr'])
+            duration, *_ = self.model.dp_ort.run(None, {
+                'text_ids': ids, 'style_dp': self.style.dp, 'text_mask': mask})
+            speed = bounded_speed(float(duration[0]), target_seconds, self.speed, max_speed)
+        self.last_speed = speed
+        wav, duration = self.model(text, 'tr', self.style, self.steps, speed,
                                    silence_duration=0.12)
         rate = self.model.sample_rate
         audio = np.asarray(wav[0, :int(float(duration[0]) * rate)], dtype=np.float32)
@@ -62,9 +70,11 @@ def main():
         try:
             request = json.loads(line)
             started = time.perf_counter()
-            audio, rate = engine.generate(request['text'])
+            audio, rate = engine.generate(request['text'], request.get('target_seconds'),
+                                          request.get('max_speed', 1.55))
             result = {'audio': base64.b64encode(audio.astype('<f4').tobytes()).decode('ascii'),
-                      'rate': rate, 'seconds': time.perf_counter() - started}
+                      'rate': rate, 'seconds': time.perf_counter() - started,
+                      'speed': engine.last_speed}
         except Exception as exc:
             result = {'error': str(exc)}
         print(json.dumps(result), flush=True)

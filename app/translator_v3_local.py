@@ -19,16 +19,17 @@ import wave
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import requests
 import sounddevice as sd
-from argostranslate import translate as argos_translate
 from scipy.signal import resample_poly
 from local_voice import SupertonicVoice
 from speech_segments import AudioSegment, SileroVAD, SpeechSegmenter
 from speech_text import speech_chunks
 from echo_guard import PlaybackEchoGuard
+from realtime_policy import TranscriptOverlap
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -36,7 +37,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 
 ROOT = Path(__file__).resolve().parent.parent
-APP_VERSION = "0.3.0-rc.1"
+APP_VERSION = "0.4.0-rc.1"
 
 
 @dataclass
@@ -55,6 +56,7 @@ class Config:
     context_sentences: int = 3
     output_device: Optional[int] = None
     vad_model: Path = ROOT / "models" / "vad" / "silero_vad.onnx"
+    adaptive_timing: bool = True
 
 
 CFG = Config()
@@ -75,7 +77,7 @@ def apply_profile(profile):
 
 RUNNING = threading.Event()
 RUNNING.set()
-AUDIO_QUEUE: queue.Queue[AudioSegment] = queue.Queue(maxsize=8)
+AUDIO_QUEUE: queue.Queue[AudioSegment] = queue.Queue()
 PLAY_QUEUE: queue.Queue[PlayItem] = queue.Queue(maxsize=8)
 
 
@@ -86,6 +88,13 @@ class PlayItem:
     label: str
     created_at: float
     source_started_at: float = 0.0
+
+
+@dataclass
+class SpeechJob:
+    text: str
+    source_started_at: float
+    source_seconds: float
 
 
 def available_port(preferred: int) -> int:
@@ -172,12 +181,9 @@ class Capture:
                 segment = self.segmenter.feed(frame, started_at)
                 if segment is not None:
                     print(f"[VAD] {len(segment.samples)/CFG.sample_rate:.2f}s | {segment.reason}")
-                    try:
-                        AUDIO_QUEUE.put_nowait(segment)
-                    except queue.Full:
-                        AUDIO_QUEUE.get_nowait()
-                        AUDIO_QUEUE.put_nowait(segment)
-                        print("[UYARI] STT geride kaldi; en eski parca atlandi")
+                    AUDIO_QUEUE.put_nowait(segment)
+                    if AUDIO_QUEUE.qsize() > 3:
+                        print(f"[GECIKME] STT bekleyen parca={AUDIO_QUEUE.qsize()}; cumleler korunuyor")
             except Exception as exc:
                 print(f"[VAD HATASI] {exc}")
                 self.segmenter.reset()
@@ -289,15 +295,7 @@ class WhisperVulkan:
 
 class LocalTranslator:
     def __init__(self):
-        languages = argos_translate.get_installed_languages()
-        source = next((lang for lang in languages if lang.code == "en"), None)
-        target = next((lang for lang in languages if lang.code == "tr"), None)
-        if not source or not target:
-            raise RuntimeError("Argos en->tr modeli kurulu degil")
-        self.translation = source.get_translation(target)
-        if not self.translation:
-            raise RuntimeError("Argos en->tr cevirisi bulunamadi")
-        self.translation.translate("Hello.")
+        self.translation = None
         self.previous_source = ""
         self.history: list[tuple[str, str]] = []
         self.session = requests.Session()
@@ -452,6 +450,14 @@ class LocalTranslator:
         return result
 
     def _translate_with_argos_context(self, text: str) -> str:
+        if self.translation is None:
+            from argostranslate import translate as argos_translate
+            languages = argos_translate.get_installed_languages()
+            source = next((lang for lang in languages if lang.code == "en"), None)
+            target = next((lang for lang in languages if lang.code == "tr"), None)
+            if source is None or target is None:
+                raise RuntimeError("Argos en->tr yedek modeli kurulu degil")
+            self.translation = source.get_translation(target)
         # Önceki İngilizce cümleyi bağlam olarak beraber çevir. Argos ayırıcı
         # çubukların sayısını değiştirebilse de koruduğu için son kısmı güvenle
         # alabiliriz. Böylece he/it/they gibi zamirler kör çevrilmez.
@@ -538,8 +544,8 @@ class Player:
             print(f"[CAL] {item.label} | kuyruk={delay:.0f}ms | kaynak baslangicindan={total:.0f}ms")
             # Tek bir çıkış akışını sürekli açık tut: parçalar arasında cihazı
             # kapatıp açmanın oluşturduğu klik ve boşlukları önler.
-            audio = resample(item.samples, item.sample_rate, self.output_rate)
             try:
+                audio = resample(item.samples, item.sample_rate, self.output_rate)
                 step = max(1, self.output_rate // 20)
                 for offset in range(0, len(audio), step):
                     if not RUNNING.is_set():
@@ -553,6 +559,8 @@ class Player:
             except Exception as exc:
                 if RUNNING.is_set():
                     print(f"[CIKIS HATASI] {exc}")
+            finally:
+                PLAY_QUEUE.task_done()
 
     def stop(self):
         try:
@@ -567,13 +575,33 @@ class Pipeline:
     def __init__(self, output_device: Optional[int]):
         self.output_device = output_device
         self.echo_guard = PlaybackEchoGuard()
-        self.whisper = WhisperVulkan()
-        self.tts = LocalTTS()
-        try:
-            self.translator = LocalTranslator()
-        except Exception:
-            self.tts.stop()
-            raise
+        self.overlap_text = TranscriptOverlap()
+        self.playback_until = 0.0
+        self.startup_started = time.perf_counter()
+        # Load independent models together; do not import/warm the unused Argos path.
+        def start_whisper():
+            model = WhisperVulkan()
+            try:
+                model.start()
+                return model
+            except Exception:
+                model.stop()
+                raise
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures = [pool.submit(start_whisper), pool.submit(LocalTTS), pool.submit(LocalTranslator)]
+            models, errors = [], []
+            for future in futures:
+                try:
+                    models.append(future.result())
+                except Exception as exc:
+                    models.append(None)
+                    errors.append(exc)
+            if errors:
+                for model in models:
+                    if model:
+                        model.stop()
+                raise errors[0]
+            self.whisper, self.tts, self.translator = models
         self.thread = threading.Thread(target=self.loop, daemon=True)
         self.translation_jobs = queue.Queue(maxsize=8)
         self.translation_thread = threading.Thread(target=self.translation_loop, daemon=True)
@@ -581,7 +609,6 @@ class Pipeline:
         self.speech_thread = threading.Thread(target=self.speech_loop, daemon=True)
 
     def start(self):
-        self.whisper.start()
         # İlk gerçek cümlede shader/model ısınması yaşanmasın.
         warm_audio, rate = self.tts.synthesize("Sistem hazır.")
         self.whisper.transcribe(resample(warm_audio, rate, CFG.sample_rate))
@@ -591,6 +618,7 @@ class Pipeline:
         self.speech_thread.start()
         self.translation_thread.start()
         self.thread.start()
+        print(f"[ACILIS] Modeller ve isinma: {time.perf_counter()-self.startup_started:.2f}s")
 
     def speech_loop(self):
         while RUNNING.is_set():
@@ -602,19 +630,29 @@ class Pipeline:
                 if isinstance(job, PlayItem):
                     self.enqueue(job)
                     continue
-                translated, source_started = job
+                translated, source_started = job.text, job.source_started_at
                 wait_ms = (time.perf_counter() - source_started)*1000
                 if wait_ms > 12000:
                     print(f"[GECIKME] Ses sirasi kaynagin {wait_ms/1000:.1f}s gerisinde")
                 started = time.perf_counter()
-                for audio, rate in self.tts.stream(translated):
+                duration = 0.0
+                backlog = max(0, self.playback_until-time.perf_counter())
+                for audio, rate in self.tts.stream(translated,
+                                                  job.source_seconds if CFG.adaptive_timing else None,
+                                                  backlog):
                     if not RUNNING.is_set():
                         break
                     self.echo_guard.remember(audio, rate)
+                    duration += len(audio)/rate
                     self.enqueue(PlayItem(audio, rate, "EN->TR", time.perf_counter(), source_started))
                 print(f"[TTS] {(time.perf_counter()-started)*1000:.0f}ms")
+                print(f"[AKIS] kaynak={job.source_seconds:.2f}s ses={duration:.2f}s "
+                      f"hiz={getattr(self.tts, 'last_speed', 1.12):.2f} "
+                      f"bekleyen_ses={max(0,self.playback_until-time.perf_counter()):.2f}s")
             except Exception as exc:
                 print(f"[TTS HATASI] {exc}")
+            finally:
+                self.speech_jobs.task_done()
 
     def submit_speech(self, job):
         while RUNNING.is_set():
@@ -628,6 +666,7 @@ class Pipeline:
         while RUNNING.is_set():
             try:
                 PLAY_QUEUE.put(item, timeout=0.1)
+                self.playback_until = max(time.perf_counter(), self.playback_until) + len(item.samples)/item.sample_rate
                 return
             except queue.Full:
                 continue
@@ -642,6 +681,8 @@ class Pipeline:
                 self.process(segment)
             except Exception as exc:
                 print(f"[PIPELINE HATASI] {exc}")
+            finally:
+                AUDIO_QUEUE.task_done()
 
     def process(self, segment: AudioSegment):
         started = time.perf_counter()
@@ -653,6 +694,9 @@ class Pipeline:
         if language == "tr" and self.echo_guard.matches(segment.samples, CFG.sample_rate):
             print("[SES DONUSU] Kendi uretilen sesimiz girise geri dondu; tekrar oynatma atlandi. "
                   "Windows cikisini/kulaklik yonlendirmesini kontrol edin.")
+            return
+        text = self.overlap_text.apply(text, language, segment.overlap_samples > 0)
+        if not text:
             return
 
         # Keep recognising while the previous result is being translated.
@@ -673,13 +717,15 @@ class Pipeline:
                 self.translate_result(*job)
             except Exception as exc:
                 print(f"[CEVIRI HATASI] {exc}")
+            finally:
+                self.translation_jobs.task_done()
 
     def translate_result(self, segment, text, language, probability):
 
         if language == "tr" and probability >= CFG.language_probability:
             self.translator.history.clear()
             self.translator.previous_source = ""
-            self.submit_speech(PlayItem(segment.samples, CFG.sample_rate, "TR dogrudan", time.perf_counter(), segment.started_at))
+            self.submit_speech(PlayItem(segment.samples[segment.overlap_samples:], CFG.sample_rate, "TR dogrudan", time.perf_counter(), segment.started_at))
             return
 
         if language != "en" or probability < CFG.language_probability:
@@ -697,7 +743,8 @@ class Pipeline:
               f"konusma_sonundan={after_speech:.0f}ms | "
               f"kuyruk stt={AUDIO_QUEUE.qsize()} ceviri={self.translation_jobs.qsize()} "
               f"tts={self.speech_jobs.qsize()} oynatma={PLAY_QUEUE.qsize()}")
-        self.submit_speech((translated, segment.started_at))
+        source_seconds = max(.35, len(segment.samples)/CFG.sample_rate - segment.overlap_samples/CFG.sample_rate)
+        self.submit_speech(SpeechJob(translated, segment.started_at, source_seconds))
 
     def stop(self):
         self.tts.stop()

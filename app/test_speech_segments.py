@@ -34,7 +34,7 @@ class SegmentTests(unittest.TestCase):
         self.assertEqual(self.feed([.9]*30 + [.4]*8 + [.1]*4 + [.9]*30), [])
         segments = self.feed([.1]*8)
         self.assertEqual(len(segments), 1)
-        self.assertEqual(segments[0].reason, 'pause')
+        self.assertEqual(segments[0].reason, 'long_pause')
         self.assertGreater(segments[0].ended_at, 102)
         self.assertAlmostEqual(len(segments[0].samples)/16000, (30+8+4+30+3)*.032)
 
@@ -42,17 +42,25 @@ class SegmentTests(unittest.TestCase):
         self.assertEqual(self.feed([.9]*3 + [.1]*20), [])
 
     def test_long_phrase_uses_short_pause(self):
-        self.assertEqual(self.feed([.9]*204), [])
+        self.assertEqual(self.feed([.9]*90), [])
         result = self.feed([.1]*3)
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].reason, 'long_pause')
 
     def test_hard_limit_is_bounded_and_does_not_duplicate_audio(self):
         results = self.feed([.9]*500)
-        self.assertEqual(len(results), 2)
+        self.assertEqual(len(results), 4)
         self.assertTrue(all(s.reason == 'limit' for s in results))
-        self.assertEqual(sum(len(s.samples) for s in results), 500*512)
-        self.assertAlmostEqual(results[1].started_at, results[0].started_at+8)
+        results += self.feed([.1]*10)
+        self.assertEqual(sum(len(s.samples)-s.overlap_samples for s in results), 503*512)
+        self.assertAlmostEqual(results[1].started_at, results[0].started_at+3.2-.640)
+        self.assertEqual(results[1].overlap_samples, 10240)
+
+    def test_first_continuous_phrase_is_ready_in_3_2_seconds(self):
+        self.assertEqual(self.feed([.9]*99), [])
+        result = self.feed([.9])
+        self.assertEqual(len(result), 1)
+        self.assertAlmostEqual(len(result[0].samples)/16000, 3.2)
 
     def test_reset_does_not_join_audio_across_capture_gap(self):
         self.feed([.9]*15)

@@ -12,6 +12,7 @@ class AudioSegment:
     started_at: float
     ended_at: float = 0.0
     reason: str = "pause"
+    overlap_samples: int = 0
 
 
 class SileroVAD:
@@ -56,11 +57,14 @@ class SpeechSegmenter:
     rate = 16000
     frame_samples = 512
 
-    def __init__(self, detector, silence_ms=384, max_seconds=6.5, hard_seconds=8.0):
+    def __init__(self, detector, silence_ms=384, max_seconds=2.4, hard_seconds=4.0,
+                 first_seconds=3.2, overlap_ms=640):
         self.detector = detector
         self.silence_frames = max(1, round(silence_ms / 32))
         self.max_frames = round(max_seconds / .032)
         self.hard_frames = round(hard_seconds / .032)
+        self.first_frames = round(first_seconds / .032)
+        self.overlap_frames = round(overlap_ms / 32)
         self.reset()
 
     def reset(self):
@@ -72,6 +76,8 @@ class SpeechSegmenter:
         self.active = False
         self.started_at = 0.0
         self.last_voice_end = 0.0
+        self.first = True
+        self.overlap_samples = 0
 
     def feed(self, frame, started_at):
         probability = self.detector(frame)
@@ -102,7 +108,7 @@ class SpeechSegmenter:
             reason = "pause"
         elif len(self.frames) >= self.max_frames and self.silence >= 3:
             reason = "long_pause"
-        elif len(self.frames) >= self.hard_frames:
+        elif len(self.frames) >= (self.first_frames if self.first else self.hard_frames):
             reason = "limit"
         if reason is None:
             return None
@@ -114,11 +120,16 @@ class SpeechSegmenter:
         segment = None
         if self.speech_frames >= 8:
             segment = AudioSegment(np.concatenate(selected), self.started_at,
-                                   self.last_voice_end, reason)
+                                   self.last_voice_end, reason, self.overlap_samples)
         # Do not repeat speech at a forced boundary. Silent pre-roll can be reused.
-        self.frames = []
+        carry = self.frames[-self.overlap_frames:] if reason == "limit" and self.overlap_frames else []
+        self.frames = list(carry)
         self.speech_frames = self.silence = 0
-        self.active = False
+        self.active = bool(carry)
+        self.overlap_samples = len(carry)*self.frame_samples
+        self.first = False
+        if carry:
+            self.started_at = frame_end - self.overlap_samples/self.rate
         self.preroll.clear()
         if reason != "limit":
             tail_start = frame_end - len(tail) * .032

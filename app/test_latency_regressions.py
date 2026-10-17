@@ -54,6 +54,7 @@ class RegressionTests(unittest.TestCase):
         pipeline = app.Pipeline.__new__(app.Pipeline)
         pipeline.whisper = Mock()
         pipeline.echo_guard = Mock()
+        pipeline.overlap_text = app.TranscriptOverlap()
         pipeline.whisper.transcribe.return_value = ('Hello.', 'en', .99)
         pipeline.translator = Mock()
         pipeline.translation_jobs = app.queue.Queue()

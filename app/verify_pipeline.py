@@ -30,10 +30,23 @@ def main():
             segment = segmenter.feed(audio[offset:offset+512], started-len(audio)/16000+offset/16000)
             if segment:
                 app.AUDIO_QUEUE.put(segment)
-        item = app.PLAY_QUEUE.get(timeout=30)
-        assert item.label == 'EN->TR', item.label
-        assert len(item.samples) > item.sample_rate*.1
-        print(f'PASS: VAD -> STT -> MT -> TTS -> output queue; {len(item.samples)/item.sample_rate:.2f}s audio', flush=True)
+        items = []
+        deadline = time.perf_counter()+45
+        while True:
+            try:
+                item = app.PLAY_QUEUE.get(timeout=.1)
+                items.append(item)
+                app.PLAY_QUEUE.task_done()
+            except queue.Empty:
+                pass
+            if not any(q.unfinished_tasks for q in
+                       (app.AUDIO_QUEUE, pipeline.translation_jobs, pipeline.speech_jobs, app.PLAY_QUEUE)):
+                break
+            if time.perf_counter() > deadline:
+                raise TimeoutError('Pipeline did not drain in 45 seconds')
+        assert items and all(item.label == 'EN->TR' for item in items)
+        assert all(len(item.samples) > item.sample_rate*.1 for item in items)
+        print(f'PASS: all VAD -> STT -> MT -> TTS jobs drained; {len(items)} audio chunks', flush=True)
         print('Headphone playback and live capture latency not tested.', flush=True)
     except queue.Empty:
         raise AssertionError('No English-to-Turkish audio within 30 seconds')

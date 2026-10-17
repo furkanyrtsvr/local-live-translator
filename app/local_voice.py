@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 from scipy.signal import butter, sosfilt
 from speech_text import speech_chunks
+from realtime_policy import phrase_budget
 
 APP_DIR = Path(__file__).resolve().parent
 ROOT = APP_DIR.parent
@@ -77,20 +78,27 @@ class SupertonicVoice:
             raise RuntimeError(response['error'])
         return response
 
-    def synthesize(self, text):
+    def synthesize(self, text, target_seconds=None):
         if not text.strip():
             return np.empty(0, np.float32), 44100
-        self.process.stdin.write(json.dumps({'text': text}, ensure_ascii=False) + '\n')
+        self.process.stdin.write(json.dumps({'text': text, 'target_seconds': target_seconds,
+                                             'max_speed': self.config.get('max_speed', 1.55)},
+                                            ensure_ascii=False) + '\n')
         self.process.stdin.flush()
         response = self._response(45)
+        self.last_speed = response.get('speed', self.config['speed'])
         audio = np.frombuffer(base64.b64decode(response['audio']), dtype='<f4').copy()
         return clean_audio(audio, response['rate']), response['rate']
 
-    def stream(self, text):
+    def stream(self, text, source_seconds=None, backlog_seconds=0):
         # The first complete phrase can play while subsequent phrases synthesize.
         # This is sentence streaming, not sample streaming inside the neural model.
-        for phrase in speech_chunks(text):
-            yield self.synthesize(phrase)
+        phrases = speech_chunks(text, minimum=35, maximum=120)
+        total_words = sum(len(phrase.split()) for phrase in phrases)
+        for phrase in phrases:
+            budget = (phrase_budget(source_seconds, len(phrase.split()), total_words, backlog_seconds)
+                      if source_seconds is not None else None)
+            yield self.synthesize(phrase, budget)
 
     def stop(self):
         process = getattr(self, 'process', None)

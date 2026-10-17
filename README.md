@@ -8,10 +8,10 @@ için İngilizce tutulmuştur.
 > Geliştirme aşamasında: sıfır gecikmeli simultane çeviri değildir. Çeviri
 > doğruluğu, cümle sınırları ve kuyruk gecikmesi hâlâ iyileştirme gerektirir.
 
-## Güncel sürüm: v0.3.0-rc.1
+## Güncel sürüm: v0.4.0-rc.1
 
 Bu sürüm aday sürümdür. Önceki sürümler [GitHub Releases](https://github.com/furkanyrtsvr/local-live-translator/releases)
-altında korunur. [Sürüm notları ve karşılaştırma](docs/releases/v0.3.0-rc.1.md).
+altında korunur. [Sürüm notları ve gecikme ölçümleri](docs/releases/v0.4.0-rc.1.md).
 
 - **Ses yakalama:** sounddevice ve VB-CABLE.
 - **Konuşma algılama:** yerel Silero VAD (CPU/ONNX), ayrı ses işleme iş parçacığı.
@@ -141,6 +141,13 @@ indirmez. Uygulamanın tamamının eski kaynak kodu için ilgili Release'i indir
 `speed`: 1.0 normal, 1.12 daha hızlı. Daha az `steps` kaliteyi düşürebilir.
 Piper dosyaları V3 için artık gerekli değildir.
 
+Canlı akışta sesin süre tahmini kaynak parçanın süresiyle karşılaştırılır.
+Gerekirse `speed` değerinden başlayarak `max_speed` sınırına kadar hızlandırılır
+(varsayılan `app/voice_config.json`: 1.55). Ton perdesi yeniden örneklemeyle
+değiştirilmez; modelin süre kontrolü kullanılır. Kısa konuşmalar normal hızda kalabilir.
+Kullanıcının seçtiği politika cümleleri korumaktır; geride kaldığında özetleme
+veya eski cümleleri atma yapılmaz. Ağır yükte gecikme yine büyüyebilir.
+
 ## Doğrulama ve örnek ses
 
 Bağımlılıklar ve modeller hazırken:
@@ -166,8 +173,10 @@ kuyrukları ve uzun metinde ilk cümle grubunun daha erken seslendirilmesi eklen
 ## Bilinen sınırlamalar
 
 - Konuşma parçaları Silero olasılıkları ve duraklamayla ayrılır; anlamsal cümle
-  sonu garantisi yoktur. Hiç duraklamayan konuşma 8 saniyede zorunlu bölünür.
-  Yoğun akışta kuyruk büyümesi hâlâ mümkündür; kuyruk dolunca eski STT parçası atlanır.
+  sonu garantisi yoktur. İlk kesintisiz parça 3.2 saniyede, sonraki parçalar
+  4 saniyede bölünür. Sınırda 640 ms ses bağlamı korunur; tekrar sözcükleri ayıklanır.
+  Yoğun akışta kuyruk büyümesi hâlâ mümkündür. Bekleyen STT parçaları bellekte
+  korunur; uzun süre yetişemeyen kullanımda bellek tüketimi artar.
 - TranslateGemma küçük testte bazı belirgin Qwen hatalarını azalttı; deyim,
   ayrıntı ve vurgu kayıpları devam edebilir. Genel doğruluk puanı hesaplanmadı.
 - `quality` daha yavaştır: daha büyük modeller düşük gecikme garantisi değildir.
