@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import argparse
 import math
 import json
 import os
@@ -26,6 +27,8 @@ from argostranslate import translate as argos_translate
 from scipy.signal import resample_poly
 from local_voice import SupertonicVoice
 from speech_segments import AudioSegment, SileroVAD, SpeechSegmenter
+from speech_text import speech_chunks
+from echo_guard import PlaybackEchoGuard
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -33,6 +36,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 
 ROOT = Path(__file__).resolve().parent.parent
+APP_VERSION = "0.3.0-rc.1"
 
 
 @dataclass
@@ -42,10 +46,11 @@ class Config:
     language_probability: float = 0.52
     whisper_port: int = 8178
     whisper_threads: int = 8
-    whisper_model: Path = ROOT / "models" / "whisper" / "ggml-base.bin"
+    whisper_model: Path = ROOT / "models" / "whisper" / "ggml-small.bin"
     whisper_server: Path = ROOT / "vendor" / "whisper-vulkan" / "whisper-server.exe"
     llm_server: Path = ROOT / "vendor" / "llama-vulkan" / "llama-server.exe"
-    llm_model: Path = ROOT / "models" / "llm" / "Qwen3-4B-Q4_K_M.gguf"
+    llm_model: Path = ROOT / "models" / "llm" / "translategemma-4b-it.Q5_K_M.gguf"
+    translation_backend: str = "translategemma"
     llm_port: int = 8180
     context_sentences: int = 3
     output_device: Optional[int] = None
@@ -53,6 +58,21 @@ class Config:
 
 
 CFG = Config()
+
+
+def apply_profile(profile):
+    if profile == "legacy":
+        CFG.whisper_model = ROOT / "models" / "whisper" / "ggml-base.bin"
+        CFG.llm_model = ROOT / "models" / "llm" / "Qwen3-4B-Q4_K_M.gguf"
+        CFG.translation_backend = "qwen"
+    elif profile == "quality":
+        CFG.whisper_model = ROOT / "models" / "whisper" / "ggml-small.bin"
+        CFG.llm_model = ROOT / "models" / "llm" / "translategemma-4b-it.Q5_K_M.gguf"
+        CFG.translation_backend = "translategemma"
+    else:
+        raise ValueError(f"Unknown profile: {profile}")
+
+
 RUNNING = threading.Event()
 RUNNING.set()
 AUDIO_QUEUE: queue.Queue[AudioSegment] = queue.Queue(maxsize=8)
@@ -192,6 +212,7 @@ class WhisperVulkan:
             if not path.exists():
                 raise FileNotFoundError(path)
         self.process: Optional[subprocess.Popen] = None
+        self.server_log = None
         self.session = requests.Session()
         self.session.trust_env = False
         self.port = available_port(CFG.whisper_port)
@@ -204,22 +225,23 @@ class WhisperVulkan:
             "--host", "127.0.0.1", "--port", str(self.port),
         ]
         creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        self.server_log = (ROOT / "whisper_server.log").open("a", encoding="utf-8")
         self.process = subprocess.Popen(
             command, cwd=str(CFG.whisper_server.parent),
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdout=self.server_log, stderr=self.server_log,
             creationflags=creationflags,
         )
-        deadline = time.time() + 15
+        deadline = time.time() + 60
         while time.time() < deadline:
             if self.process.poll() is not None:
                 raise RuntimeError("Whisper Vulkan sunucusu baslatilamadi")
             try:
                 with socket.create_connection(("127.0.0.1", self.port), timeout=0.2):
-                    print("Whisper/Vulkan: HAZIR (RX 7600)")
+                    print(f"Whisper/Vulkan: HAZIR ({CFG.whisper_model.name})")
                     return
             except OSError:
                 time.sleep(0.1)
-        raise TimeoutError("Whisper Vulkan sunucusu 15 saniyede hazir olmadi")
+        raise TimeoutError("Whisper Vulkan sunucusu 60 saniyede hazir olmadi; whisper_server.log")
 
     @staticmethod
     def wav_bytes(samples: np.ndarray) -> bytes:
@@ -261,6 +283,8 @@ class WhisperVulkan:
                 self.process.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 self.process.kill()
+        if self.server_log:
+            self.server_log.close()
 
 
 class LocalTranslator:
@@ -281,11 +305,14 @@ class LocalTranslator:
         self.port = available_port(CFG.llm_port)
         self.process: Optional[subprocess.Popen] = None
         self.llm_ready = False
+        self.server_log = None
         self._start_context_model()
-        print("Baglamli ceviri: HAZIR (Qwen/Vulkan, Argos yedek)")
+        print(f"Ceviri: HAZIR ({CFG.translation_backend}/Vulkan, {CFG.llm_model.name})")
 
     def _start_context_model(self):
         if not CFG.llm_server.exists() or not CFG.llm_model.exists():
+            if CFG.translation_backend == "translategemma":
+                raise FileNotFoundError("Kalite modeli eksik. py -3.13 app/download_quality_models.py")
             print("[UYARI] Qwen bulunamadi; Argos baglam modu kullanilacak")
             return
         command = [
@@ -295,12 +322,13 @@ class LocalTranslator:
             "--reasoning", "off", "--no-webui",
         ]
         creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        self.server_log = (ROOT / "translation_server.log").open("a", encoding="utf-8")
         self.process = subprocess.Popen(
             command, cwd=str(CFG.llm_server.parent),
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdout=self.server_log, stderr=self.server_log,
             creationflags=creationflags,
         )
-        deadline = time.time() + 30
+        deadline = time.time() + 90
         while time.time() < deadline:
             if self.process.poll() is not None:
                 break
@@ -314,23 +342,77 @@ class LocalTranslator:
             except requests.RequestException:
                 pass
             time.sleep(0.15)
+        if CFG.translation_backend == "translategemma":
+            self.stop()
+            raise RuntimeError("TranslateGemma baslatilamadi; translation_server.log kaydina bakin")
         print("[UYARI] Qwen baslatilamadi; Argos kullanilacak")
 
     def translate(self, text: str) -> str:
         if self.llm_ready:
             try:
-                current = self._translate_with_context(text)
+                current = (self._translate_with_gemma(text) if CFG.translation_backend == "translategemma"
+                           else self._translate_with_context(text))
+                if re.search(r"[\u3400-\u9fff]", current) and not re.search(r"[\u3400-\u9fff]", text):
+                    raise ValueError("Ceviri Turkce disinda karakterler uretti")
                 self.history.append((text, current))
                 self.history = self.history[-CFG.context_sentences:]
                 self.previous_source = text[-500:]
                 return self._prepare_for_speech(current)
             except Exception as exc:
-                print(f"[UYARI] Qwen ceviri hatasi, Argos'a gecildi: {exc}")
+                print(f"[UYARI] Yerel ceviri hatasi, Argos'a gecildi: {exc}")
 
         current = self._translate_with_argos_context(text)
         self.history.append((text, current))
         self.history = self.history[-CFG.context_sentences:]
         return self._prepare_for_speech(current)
+
+    @staticmethod
+    def _gemma_turn(text):
+        # Exact text contract embedded in TranslateGemma's tokenizer.chat_template.
+        instruction = (
+            "You are a professional English (en) to Turkish (tr) translator. Your goal is to "
+            "accurately convey the meaning and nuances of the original English text while "
+            "adhering to Turkish grammar, vocabulary, and cultural sensitivities.\n"
+            "Produce only the Turkish translation, without any additional explanations or "
+            "commentary. Please translate the following English text into Turkish:\n\n\n"
+        )
+        return "<start_of_turn>user\n" + instruction + text.strip() + "<end_of_turn>\n"
+
+    def _translate_with_gemma(self, text):
+        # Translating a whole multi-sentence audio chunk can lose details (e.g.
+        # ingredients). Keep short adjacent sentences together and translate
+        # completed groups in order, carrying bounded context between them.
+        context = list(self.history[-2:])
+        results = []
+        for source in speech_chunks(text, minimum=30, maximum=1):
+            target = self._gemma_request(source, context)
+            results.append(target)
+            context = (context + [(source, target)])[-2:]
+        return " ".join(results)
+
+    def _gemma_request(self, text, context):
+        # /completion preserves TranslateGemma's specialised template; generic
+        # chat endpoints may strip source_lang_code/target_lang_code content fields.
+        escape = lambda s: re.sub(r"<(?:start_of_turn|end_of_turn|bos|eos)>", "", s)
+        # llama.cpp automatically inserts the model's BOS token. Including it in
+        # the text would create two BOS tokens (confirmed in server diagnostics).
+        prompt = ""
+        for source, target in context:
+            prompt += self._gemma_turn(escape(source))
+            prompt += "<start_of_turn>model\n" + escape(target) + "<end_of_turn>\n"
+        prompt += self._gemma_turn(escape(text)) + "<start_of_turn>model\n"
+        response = self.session.post(f"http://127.0.0.1:{self.port}/completion", json={
+            "prompt": prompt, "temperature": 0, "n_predict": 256,
+            "stop": ["<end_of_turn>", "<eos>"], "cache_prompt": True,
+        }, timeout=30)
+        response.raise_for_status()
+        result = response.json()
+        if result.get("stopped_limit"):
+            raise ValueError("TranslateGemma token sinirinda kesildi")
+        current = result.get("content", "").strip()
+        if not current:
+            raise ValueError("TranslateGemma bos sonuc verdi")
+        return current
 
     def _translate_with_context(self, text: str) -> str:
         context = "\n".join(
@@ -391,6 +473,8 @@ class LocalTranslator:
                 self.process.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 self.process.kill()
+        if self.server_log:
+            self.server_log.close()
 
     @staticmethod
     def _prepare_for_speech(text: str) -> str:
@@ -482,6 +566,7 @@ class Player:
 class Pipeline:
     def __init__(self, output_device: Optional[int]):
         self.output_device = output_device
+        self.echo_guard = PlaybackEchoGuard()
         self.whisper = WhisperVulkan()
         self.tts = LocalTTS()
         try:
@@ -525,6 +610,7 @@ class Pipeline:
                 for audio, rate in self.tts.stream(translated):
                     if not RUNNING.is_set():
                         break
+                    self.echo_guard.remember(audio, rate)
                     self.enqueue(PlayItem(audio, rate, "EN->TR", time.perf_counter(), source_started))
                 print(f"[TTS] {(time.perf_counter()-started)*1000:.0f}ms")
             except Exception as exc:
@@ -564,6 +650,10 @@ class Pipeline:
         if not text:
             return
         print(f"[STT {stt_ms:.0f}ms] {language} %{probability*100:.0f}: {text}")
+        if language == "tr" and self.echo_guard.matches(segment.samples, CFG.sample_rate):
+            print("[SES DONUSU] Kendi uretilen sesimiz girise geri dondu; tekrar oynatma atlandi. "
+                  "Windows cikisini/kulaklik yonlendirmesini kontrol edin.")
+            return
 
         # Keep recognising while the previous result is being translated.
         while RUNNING.is_set():
@@ -616,7 +706,12 @@ class Pipeline:
 
 
 def main():
-    print("\nPC SESI CANLI CEVIRMEN V3 - TAMAMEN YEREL / AMD VULKAN")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--profile", choices=["quality", "legacy"], default="quality")
+    args = parser.parse_args()
+    apply_profile(args.profile)
+    print(f"\nLOCAL LIVE TRANSLATOR {APP_VERSION} - YEREL / AMD VULKAN")
+    print(f"Model profili: {args.profile} | STT: {CFG.whisper_model.name} | ceviri: {CFG.llm_model.name}")
     input_device = select_device("input")
     output_device = select_device("output")
     CFG.output_device = output_device

@@ -53,6 +53,7 @@ class RegressionTests(unittest.TestCase):
     def test_recognition_hands_off_without_running_translation(self):
         pipeline = app.Pipeline.__new__(app.Pipeline)
         pipeline.whisper = Mock()
+        pipeline.echo_guard = Mock()
         pipeline.whisper.transcribe.return_value = ('Hello.', 'en', .99)
         pipeline.translator = Mock()
         pipeline.translation_jobs = app.queue.Queue()

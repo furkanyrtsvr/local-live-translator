@@ -8,12 +8,15 @@ için İngilizce tutulmuştur.
 > Geliştirme aşamasında: sıfır gecikmeli simultane çeviri değildir. Çeviri
 > doğruluğu, cümle sınırları ve kuyruk gecikmesi hâlâ iyileştirme gerektirir.
 
-## Güncel sürüm: V3
+## Güncel sürüm: v0.3.0-rc.1
+
+Bu sürüm aday sürümdür. Önceki sürümler [GitHub Releases](https://github.com/furkanyrtsvr/local-live-translator/releases)
+altında korunur. [Sürüm notları ve karşılaştırma](docs/releases/v0.3.0-rc.1.md).
 
 - **Ses yakalama:** sounddevice ve VB-CABLE.
 - **Konuşma algılama:** yerel Silero VAD (CPU/ONNX), ayrı ses işleme iş parçacığı.
-- **Konuşma tanıma / dil algılama:** whisper.cpp, Whisper base, Vulkan.
-- **Çeviri:** llama.cpp üzerinde Qwen3-4B Q4_K_M; Argos en→tr yedeği.
+- **Konuşma tanıma / dil algılama:** whisper.cpp, Whisper small, Vulkan.
+- **Çeviri:** llama.cpp üzerinde TranslateGemma 4B Q5_K_M; Argos en→tr yedeği.
 - **Seslendirme:** Supertonic 3; AMD DirectML veya CPU, ayrı Python işlemi.
 - **Ses çıkışı:** sürekli açık callback akışı, boşta dijital sessizlik,
   anti-alias yeniden örnekleme ve sentezlenen seste uç yumuşatma.
@@ -73,9 +76,9 @@ sunucunun yanında tutun; yalnızca EXE'yi kopyalamayın.
 |---|---|---|
 | Silero VAD | `models/vad/silero_vad.onnx` | `py -3.13 app/download_vad.py` ile sabit sürüm ve SHA256 doğrulaması |
 | Whisper Vulkan sunucusu | `vendor/whisper-vulkan/whisper-server.exe` | [whisper.cpp-rocm v1.8.4](https://github.com/lemonade-sdk/whisper.cpp-rocm/releases/tag/v1.8.4) Windows Vulkan paketi |
-| Whisper base | `models/whisper/ggml-base.bin` | [ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp) |
+| Whisper small | `models/whisper/ggml-small.bin` | [ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp); indirme komutu aşağıda |
 | llama.cpp Vulkan sunucusu | `vendor/llama-vulkan/llama-server.exe` | [llama.cpp b11696](https://github.com/ggml-org/llama.cpp/releases/tag/b11696) Windows Vulkan paketi |
-| Qwen3-4B | `models/llm/Qwen3-4B-Q4_K_M.gguf` | [Qwen3-4B-GGUF](https://huggingface.co/Qwen/Qwen3-4B-GGUF) |
+| TranslateGemma 4B Q5 | `models/llm/translategemma-4b-it.Q5_K_M.gguf` | [GGUF ağırlıkları](https://huggingface.co/mradermacher/translategemma-4b-it-GGUF); indirme komutu aşağıda |
 | Supertonic kaynak | `vendor/supertonic/py/helper.py` | Aşağıdaki sabit commit |
 | Supertonic ONNX ve sesler | `models/supertonic-3/onnx/`, `models/supertonic-3/voice_styles/` | Aşağıdaki model indirmesi |
 
@@ -93,6 +96,7 @@ Argos İngilizce→Türkçe paketi de kurulu olmalıdır. Bu adım internet kull
 ```cmd
 py -3.13 -c "import argostranslate.package as p; p.update_package_index(); package=next(x for x in p.get_available_packages() if x.from_code=='en' and x.to_code=='tr'); p.install_from_path(package.download())"
 py -3.13 app/download_vad.py
+py -3.13 app/download_quality_models.py
 ```
 
 Bu yönergeler mevcut çalışma ortamındaki düzeni belgeler; sıfırdan temiz bir
@@ -108,6 +112,17 @@ Windows kurulumunda uçtan uca kurulum testi henüz yapılmamıştır.
 Çevirmenin çıkışını tekrar CABLE'a göndermeyin; geri besleme oluşabilir.
 Aynı anda eski ve yeni sürümü çalıştırmayın. Türkçe doğrudan geçiş de dil
 algılamasını beklediğinden gecikmesiz değildir.
+
+Varsayılan `quality` profili Whisper small + TranslateGemma kullanır. İndirme
+komutu bu iki dosyayı sabit revision ve yayınlanan SHA256 ile doğrular.
+Eski modeller diskte varsa aşağıdaki komutla eski model profili seçilebilir:
+
+```cmd
+run_v3_local.bat --profile legacy
+```
+
+`legacy` profili Whisper base + Qwen3-4B dosyalarını kullanır; silmez veya yeniden
+indirmez. Uygulamanın tamamının eski kaynak kodu için ilgili Release'i indirin.
 
 ## Ses ayarları
 
@@ -153,7 +168,12 @@ kuyrukları ve uzun metinde ilk cümle grubunun daha erken seslendirilmesi eklen
 - Konuşma parçaları Silero olasılıkları ve duraklamayla ayrılır; anlamsal cümle
   sonu garantisi yoktur. Hiç duraklamayan konuşma 8 saniyede zorunlu bölünür.
   Yoğun akışta kuyruk büyümesi hâlâ mümkündür; kuyruk dolunca eski STT parçası atlanır.
-- Qwen zaman zaman bozuk Türkçe üretir. TranslateGemma henüz entegre değildir.
+- TranslateGemma küçük testte bazı belirgin Qwen hatalarını azalttı; deyim,
+  ayrıntı ve vurgu kayıpları devam edebilir. Genel doğruluk puanı hesaplanmadı.
+- `quality` daha yavaştır: daha büyük modeller düşük gecikme garantisi değildir.
+- Kendi TTS sesimiz girişte tekrar tanınırsa yüksek akustik benzerliğe sahip
+  Türkçe parçalar tekrar oynatılmaz ve `[SES DONUSU]` uyarısı gösterilir. Bu bir
+  tam yankı giderici değildir; yanlış Windows ses yönlendirmesi düzeltilmelidir.
 - Supertonic cümle grubunu topluca üretir; uzun metinde gruplar sırayla gönderilir.
   Modelin içinde örnek-bazlı gerçek zamanlı üretim yapılmaz.
 - Dip ses kaynağı donanım/yönlendirme olabilir. Filtre geniş bant gürültü giderici değildir.
@@ -164,5 +184,6 @@ kuyrukları ve uzun metinde ilk cümle grubunun daha erken seslendirilmesi eklen
 Supertonic kaynak kodu MIT, model ağırlıkları BigScience Open RAIL-M kapsamındadır.
 Silero VAD MIT lisanslıdır; kaynak/model sürümü [araştırma notlarında](docs/reference-projects.md) belirtilmiştir.
 Whisper, llama.cpp, Qwen, Argos ve diğer bağımlılıkların kendi lisansları geçerlidir.
+TranslateGemma ağırlıkları Gemma kullanım koşullarına tabidir.
 Bu depo üçüncü taraf model/binary dosyalarını yeniden dağıtmaz. Proje kodu için
 ayrıca bir açık kaynak lisansı henüz seçilmemiştir.
