@@ -11,6 +11,7 @@ için İngilizce tutulmuştur.
 ## Güncel sürüm: V3
 
 - **Ses yakalama:** sounddevice ve VB-CABLE.
+- **Konuşma algılama:** yerel Silero VAD (CPU/ONNX), ayrı ses işleme iş parçacığı.
 - **Konuşma tanıma / dil algılama:** whisper.cpp, Whisper base, Vulkan.
 - **Çeviri:** llama.cpp üzerinde Qwen3-4B Q4_K_M; Argos en→tr yedeği.
 - **Seslendirme:** Supertonic 3; AMD DirectML veya CPU, ayrı Python işlemi.
@@ -60,7 +61,6 @@ py -3.11 -m venv .venv-supertonic
 .venv-supertonic\Scripts\python.exe -m pip install -r app/requirements-supertonic.txt
 ```
 
-Depo private olduğu sürece klonlamak için yetkili GitHub hesabı gerekir.
 Python paketlerini kurmak tek başına yeterli değildir: büyük modeller ve
 üçüncü taraf binary'ler bu depoya yüklenmemiştir.
 
@@ -71,6 +71,7 @@ sunucunun yanında tutun; yalnızca EXE'yi kopyalamayın.
 
 | Bileşen | Beklenen yol | Kaynak |
 |---|---|---|
+| Silero VAD | `models/vad/silero_vad.onnx` | `py -3.13 app/download_vad.py` ile sabit sürüm ve SHA256 doğrulaması |
 | Whisper Vulkan sunucusu | `vendor/whisper-vulkan/whisper-server.exe` | [whisper.cpp-rocm v1.8.4](https://github.com/lemonade-sdk/whisper.cpp-rocm/releases/tag/v1.8.4) Windows Vulkan paketi |
 | Whisper base | `models/whisper/ggml-base.bin` | [ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp) |
 | llama.cpp Vulkan sunucusu | `vendor/llama-vulkan/llama-server.exe` | [llama.cpp b11696](https://github.com/ggml-org/llama.cpp/releases/tag/b11696) Windows Vulkan paketi |
@@ -91,6 +92,7 @@ Argos İngilizce→Türkçe paketi de kurulu olmalıdır. Bu adım internet kull
 
 ```cmd
 py -3.13 -c "import argostranslate.package as p; p.update_package_index(); package=next(x for x in p.get_available_packages() if x.from_code=='en' and x.to_code=='tr'); p.install_from_path(package.download())"
+py -3.13 app/download_vad.py
 ```
 
 Bu yönergeler mevcut çalışma ortamındaki düzeni belgeler; sıfırdan temiz bir
@@ -142,18 +144,25 @@ Test bilgisayarında üç örnekte TTS 0,68–0,86 saniye sürdü. Bu **yalnızc
 üretimi**, uçtan uca gecikme değildir. Kısa cümlelerde CPU bazen DirectML'den
 hızlı olabilir. Ayrıntılar: [ölçüm ve geliştirme notları](docs/development-notes.md).
 
+17 Ekim akış geliştirmeleri, benzer projeler ve karşılaştırmalı ölçümler:
+[reference-projects.md](docs/reference-projects.md). Silero VAD, ayrı STT/çeviri
+kuyrukları ve uzun metinde ilk cümle grubunun daha erken seslendirilmesi eklendi.
+
 ## Bilinen sınırlamalar
 
-- Konuşma parçaları sessizlik eşiğiyle ayrılır; uzun konuşmaların zorunlu
-  kesilmesi ve yoğun akışta kuyruk büyümesi hâlâ mümkündür.
+- Konuşma parçaları Silero olasılıkları ve duraklamayla ayrılır; anlamsal cümle
+  sonu garantisi yoktur. Hiç duraklamayan konuşma 8 saniyede zorunlu bölünür.
+  Yoğun akışta kuyruk büyümesi hâlâ mümkündür; kuyruk dolunca eski STT parçası atlanır.
 - Qwen zaman zaman bozuk Türkçe üretir. TranslateGemma henüz entegre değildir.
-- Supertonic cümleyi topluca üretir; örnek-bazlı gerçek zamanlı üretim yapmaz.
+- Supertonic cümle grubunu topluca üretir; uzun metinde gruplar sırayla gönderilir.
+  Modelin içinde örnek-bazlı gerçek zamanlı üretim yapılmaz.
 - Dip ses kaynağı donanım/yönlendirme olabilir. Filtre geniş bant gürültü giderici değildir.
 - Supertonic'in resmî deposu arşivlenmiştir; güncelleme desteği yoktur.
 
 ## Üçüncü taraf lisansları
 
 Supertonic kaynak kodu MIT, model ağırlıkları BigScience Open RAIL-M kapsamındadır.
+Silero VAD MIT lisanslıdır; kaynak/model sürümü [araştırma notlarında](docs/reference-projects.md) belirtilmiştir.
 Whisper, llama.cpp, Qwen, Argos ve diğer bağımlılıkların kendi lisansları geçerlidir.
 Bu depo üçüncü taraf model/binary dosyalarını yeniden dağıtmaz. Proje kodu için
 ayrıca bir açık kaynak lisansı henüz seçilmemiştir.

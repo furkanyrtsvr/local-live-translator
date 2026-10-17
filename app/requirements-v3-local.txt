@@ -4,3 +4,4 @@ requests
 sounddevice
 argostranslate
 scipy
+onnxruntime>=1.20,<2

@@ -25,6 +25,7 @@ import sounddevice as sd
 from argostranslate import translate as argos_translate
 from scipy.signal import resample_poly
 from local_voice import SupertonicVoice
+from speech_segments import AudioSegment, SileroVAD, SpeechSegmenter
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -37,15 +38,7 @@ ROOT = Path(__file__).resolve().parent.parent
 @dataclass
 class Config:
     sample_rate: int = 16000
-    block_ms: int = 60
-    silence_threshold: float = 0.0022
-    # Cümleyi ortasından kesmemek için doğal duraklamayı bekle. Zorunlu kesme
-    # yalnızca çok uzun, hiç duraksamayan konuşmada güvenlik amacıyla yapılır.
-    silence_ms: int = 420
-    min_speech_ms: int = 300
-    first_max_ms: int = 6500
-    next_max_ms: int = 6500
-    preroll_ms: int = 240
+    block_ms: int = 32
     language_probability: float = 0.52
     whisper_port: int = 8178
     whisper_threads: int = 8
@@ -56,6 +49,7 @@ class Config:
     llm_port: int = 8180
     context_sentences: int = 3
     output_device: Optional[int] = None
+    vad_model: Path = ROOT / "models" / "vad" / "silero_vad.onnx"
 
 
 CFG = Config()
@@ -63,12 +57,6 @@ RUNNING = threading.Event()
 RUNNING.set()
 AUDIO_QUEUE: queue.Queue[AudioSegment] = queue.Queue(maxsize=8)
 PLAY_QUEUE: queue.Queue[PlayItem] = queue.Queue(maxsize=8)
-
-
-@dataclass
-class AudioSegment:
-    samples: np.ndarray
-    started_at: float
 
 
 @dataclass
@@ -131,69 +119,53 @@ def select_device(kind: str) -> Optional[int]:
 class Capture:
     def __init__(self, device: Optional[int]):
         self.device = device
-        self.buffer = np.empty(0, dtype=np.float32)
-        self.preroll = np.empty(0, dtype=np.float32)
-        self.active = False
-        self.first = True
-        self.started_at = 0.0
-        self.silence_samples = 0
+        self.raw_frames = queue.Queue(maxsize=64)
+        self.stopping = threading.Event()
+        self.dropped_frames = 0
+        self.input_errors = 0
+        self.thread = None
         self.stream = None
-
-    def emit(self, now: float, keep_active: bool):
-        duration_ms = len(self.buffer) * 1000 / CFG.sample_rate
-        if duration_ms >= CFG.min_speech_ms:
-            segment = AudioSegment(self.buffer.copy(), self.started_at)
-            try:
-                AUDIO_QUEUE.put_nowait(segment)
-            except queue.Full:
-                try:
-                    AUDIO_QUEUE.get_nowait()
-                    AUDIO_QUEUE.put_nowait(segment)
-                    print("[UYARI] STT geride kaldi; en eski parca atlandi")
-                except queue.Empty:
-                    pass
-        self.buffer = np.empty(0, dtype=np.float32)
-        self.active = keep_active
-        self.first = False
-        self.started_at = now if keep_active else 0.0
-        self.silence_samples = 0
 
     def callback(self, data, frames, timing, status):
         if status:
-            print(f"[SES] {status}")
+            self.input_errors += 1
         mono = data[:, 0].copy() if data.ndim > 1 else data.copy().reshape(-1)
-        now = time.perf_counter()
-        speech = rms(mono) > CFG.silence_threshold
+        # Callback only copies/enqueues. Model inference and array growth run outside it.
+        started_at = time.perf_counter() - len(mono) / CFG.sample_rate
+        try:
+            self.raw_frames.put_nowait((mono, started_at, self.dropped_frames, self.input_errors))
+        except queue.Full:
+            self.dropped_frames += 1
 
-        if speech:
-            self.silence_samples = 0
-            if not self.active:
-                self.active = True
-                self.started_at = now
-                self.buffer = np.concatenate((self.preroll, mono))
-                self.preroll = np.empty(0, dtype=np.float32)
-            else:
-                self.buffer = np.concatenate((self.buffer, mono))
-
-            duration_ms = len(self.buffer) * 1000 / CFG.sample_rate
-            maximum = CFG.first_max_ms if self.first else CFG.next_max_ms
-            if duration_ms >= maximum:
-                self.emit(now, keep_active=True)
-            return
-
-        if self.active:
-            self.buffer = np.concatenate((self.buffer, mono))
-            self.silence_samples += len(mono)
-            silence_ms = self.silence_samples * 1000 / CFG.sample_rate
-            duration_ms = len(self.buffer) * 1000 / CFG.sample_rate
-            endpoint_ms = 240 if duration_ms >= 2000 else CFG.silence_ms
-            if silence_ms >= endpoint_ms:
-                self.emit(now, keep_active=False)
-        else:
-            keep = int(CFG.sample_rate * CFG.preroll_ms / 1000)
-            self.preroll = np.concatenate((self.preroll, mono))[-keep:]
+    def loop(self):
+        previous_gaps = (0, 0)
+        while RUNNING.is_set() and not self.stopping.is_set():
+            try:
+                frame, started_at, drops, errors = self.raw_frames.get(timeout=.1)
+            except queue.Empty:
+                continue
+            if (drops, errors) != previous_gaps:
+                self.segmenter.reset()
+                previous_gaps = (drops, errors)
+                print(f"[GIRIS] Kesinti; VAD sifirlandi: kayip={drops}, cihaz={errors}")
+            try:
+                segment = self.segmenter.feed(frame, started_at)
+                if segment is not None:
+                    print(f"[VAD] {len(segment.samples)/CFG.sample_rate:.2f}s | {segment.reason}")
+                    try:
+                        AUDIO_QUEUE.put_nowait(segment)
+                    except queue.Full:
+                        AUDIO_QUEUE.get_nowait()
+                        AUDIO_QUEUE.put_nowait(segment)
+                        print("[UYARI] STT geride kaldi; en eski parca atlandi")
+            except Exception as exc:
+                print(f"[VAD HATASI] {exc}")
+                self.segmenter.reset()
 
     def start(self):
+        self.segmenter = SpeechSegmenter(SileroVAD(CFG.vad_model))
+        self.thread = threading.Thread(target=self.loop, daemon=True)
+        self.thread.start()
         self.stream = sd.InputStream(
             device=self.device,
             samplerate=CFG.sample_rate,
@@ -209,6 +181,9 @@ class Capture:
         if self.stream:
             self.stream.stop()
             self.stream.close()
+        self.stopping.set()
+        if self.thread:
+            self.thread.join(timeout=2)
 
 
 class WhisperVulkan:
@@ -258,7 +233,7 @@ class WhisperVulkan:
         return output.getvalue()
 
     def transcribe(self, samples: np.ndarray, language_hint: str = "auto") -> tuple[str, str, float]:
-        if rms(samples) < CFG.silence_threshold:
+        if rms(samples) < 1e-5:
             return "", "", 0.0
         response = self.session.post(
             f"http://127.0.0.1:{self.port}/inference",
@@ -515,6 +490,8 @@ class Pipeline:
             self.tts.stop()
             raise
         self.thread = threading.Thread(target=self.loop, daemon=True)
+        self.translation_jobs = queue.Queue(maxsize=8)
+        self.translation_thread = threading.Thread(target=self.translation_loop, daemon=True)
         self.speech_jobs = queue.Queue(maxsize=8)
         self.speech_thread = threading.Thread(target=self.speech_loop, daemon=True)
 
@@ -527,6 +504,7 @@ class Pipeline:
         self.translator.history.clear()
         self.translator.previous_source = ""
         self.speech_thread.start()
+        self.translation_thread.start()
         self.thread.start()
 
     def speech_loop(self):
@@ -540,6 +518,9 @@ class Pipeline:
                     self.enqueue(job)
                     continue
                 translated, source_started = job
+                wait_ms = (time.perf_counter() - source_started)*1000
+                if wait_ms > 12000:
+                    print(f"[GECIKME] Ses sirasi kaynagin {wait_ms/1000:.1f}s gerisinde")
                 started = time.perf_counter()
                 for audio, rate in self.tts.stream(translated):
                     if not RUNNING.is_set():
@@ -584,6 +565,27 @@ class Pipeline:
             return
         print(f"[STT {stt_ms:.0f}ms] {language} %{probability*100:.0f}: {text}")
 
+        # Keep recognising while the previous result is being translated.
+        while RUNNING.is_set():
+            try:
+                self.translation_jobs.put((segment, text, language, probability), timeout=.1)
+                return
+            except queue.Full:
+                continue
+
+    def translation_loop(self):
+        while RUNNING.is_set():
+            try:
+                job = self.translation_jobs.get(timeout=.1)
+            except queue.Empty:
+                continue
+            try:
+                self.translate_result(*job)
+            except Exception as exc:
+                print(f"[CEVIRI HATASI] {exc}")
+
+    def translate_result(self, segment, text, language, probability):
+
         if language == "tr" and probability >= CFG.language_probability:
             self.translator.history.clear()
             self.translator.previous_source = ""
@@ -599,7 +601,12 @@ class Pipeline:
         translate_ms = (time.perf_counter() - translate_started) * 1000
         total_ms = (time.perf_counter() - segment.started_at) * 1000
         print(f"[TR] {translated}")
-        print(f"[SURE] STT={stt_ms:.0f} ceviri={translate_ms:.0f} metin_hazir={total_ms:.0f}ms")
+        after_speech = ((time.perf_counter()-segment.ended_at)*1000
+                        if segment.ended_at else 0)
+        print(f"[SURE] ceviri={translate_ms:.0f} metin_hazir={total_ms:.0f}ms "
+              f"konusma_sonundan={after_speech:.0f}ms | "
+              f"kuyruk stt={AUDIO_QUEUE.qsize()} ceviri={self.translation_jobs.qsize()} "
+              f"tts={self.speech_jobs.qsize()} oynatma={PLAY_QUEUE.qsize()}")
         self.submit_speech((translated, segment.started_at))
 
     def stop(self):

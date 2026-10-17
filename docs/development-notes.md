@@ -2,6 +2,7 @@
 
 Bu belge ses modeli değişikliğinin teknik ayrıntılarını, ölçümleri ve bilinen
 sınırlamaları açıklar. Genel kurulum ve kullanım için [README](../README.md).
+17 Ekim'de yapılan VAD ve akış değişiklikleri için [güncel araştırma ve ölçüm notları](reference-projects.md).
 
 ## Çalıştırma
 
@@ -46,7 +47,7 @@ DirectML kısa cümlede CPU'dan daima hızlı değil. Ölçümler küçük örne
 oyun/GPU yükü altında tekrar ölçülmeli. Model cümleyi topluca üretir, gerçek
 örnek-bazlı akış üretimi yapmaz. Önceki cümle çalınırken sonraki iş hazırlanabilir.
 
-9 regresyon testi geçti: dil güveni, sessizlik, cümle sonlandırma, bağlam tekrarı,
+16 Ekim sürümünde 9 regresyon testi geçti: dil güveni, sessizlik, cümle sonlandırma, bağlam tekrarı,
 çıkışta sessizlik, örnek kaybetmeden blok birleştirme, DC temizleme, gürültüyü
 yükseltmeme ve anti-alias yeniden örnekleme.
 

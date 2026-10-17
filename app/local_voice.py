@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 from scipy.signal import butter, sosfilt
+from speech_text import speech_chunks
 
 APP_DIR = Path(__file__).resolve().parent
 ROOT = APP_DIR.parent
@@ -86,8 +87,10 @@ class SupertonicVoice:
         return clean_audio(audio, response['rate']), response['rate']
 
     def stream(self, text):
-        # Preserve full phrase prosody. This model generates a phrase, not sample streaming.
-        yield self.synthesize(text)
+        # The first complete phrase can play while subsequent phrases synthesize.
+        # This is sentence streaming, not sample streaming inside the neural model.
+        for phrase in speech_chunks(text):
+            yield self.synthesize(phrase)
 
     def stop(self):
         process = getattr(self, 'process', None)
